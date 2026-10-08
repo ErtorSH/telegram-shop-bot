@@ -60,6 +60,16 @@ def init_db():
                     file_id TEXT NOT NULL
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS orders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    telegram_id INTEGER NOT NULL,
+                    product_id INTEGER NOT NULL,
+                    receipt_photo_id TEXT,
+                    status TEXT DEFAULT 'pending',
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
     finally:
         conn.close()
 
