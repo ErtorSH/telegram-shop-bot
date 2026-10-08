@@ -925,4 +925,49 @@ def my_purchases(message):
             f"روی هر کدوم بزن جزئیاتش رو ببینی 👇")
     bot.send_message(message.chat.id, text, reply_markup=kb)
 
+# ================== عضویت اجباری ==================
+
+from functools import wraps
+
+JOIN_TEXT = "⚠️ برای استفاده از ربات، اول در کانال ما عضو شو!\n\nبعد از عضویت، روی «عضو شدم» بزن ✅"
+
+
+def is_member(user_id):
+    try:
+        member = bot.get_chat_member(config.CHANNEL_ID, user_id)
+        return member.status in ('creator', 'administrator', 'member', 'restricted')
+    except Exception:
+        # اگه ربات ادمین کانال نباشه اینجا خطا میاد — ربات رو ادمین کانال کن!
+        return True
+
+
+def force_join_kb():
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(InlineKeyboardButton("📢 عضویت در کانال",
+           url=f"https://t.me/{config.CHANNEL_ID.lstrip('@')}" if config.CHANNEL_ID.startswith('@') else config.CHANNEL_ID))
+    kb.add(InlineKeyboardButton("✅ عضو شدم، بررسی کن", callback_data="check_join"))
+    return kb
+
+
+def require_membership(handler):
+    @wraps(handler)
+    def wrapper(message, *args, **kwargs):
+        if not is_member(message.from_user.id):
+            bot.send_message(message.chat.id, JOIN_TEXT, reply_markup=force_join_kb())
+            return
+        return handler(message, *args, **kwargs)
+    return wrapper
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "check_join")
+def check_join(call):
+    if is_member(call.from_user.id):
+        bot.answer_callback_query(call.id, "عضویت تأیید شد ✅")
+        bot.send_message(call.message.chat.id,
+                         "خوش اومدی! حالا می‌تونی از ربات استفاده کنی 🎉",
+                         reply_markup=main_kb)
+    else:
+        bot.answer_callback_query(call.id, "هنوز عضو نشدی! اول عضو شو بعد بزن 😊", show_alert=True)
+
+
 bot.infinity_polling()
