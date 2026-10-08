@@ -959,15 +959,5 @@ def require_membership(handler):
     return wrapper
 
 
-@bot.callback_query_handler(func=lambda c: c.data == "check_join")
-def check_join(call):
-    if is_member(call.from_user.id):
-        bot.answer_callback_query(call.id, "عضویت تأیید شد ✅")
-        bot.send_message(call.message.chat.id,
-                         "خوش اومدی! حالا می‌تونی از ربات استفاده کنی 🎉",
-                         reply_markup=main_kb)
-    else:
-        bot.answer_callback_query(call.id, "هنوز عضو نشدی! اول عضو شو بعد بزن 😊", show_alert=True)
-
 
 bot.infinity_polling()
