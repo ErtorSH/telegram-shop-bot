@@ -88,6 +88,17 @@ def add_product(name, price, description="", stock=0):
         conn.close()
 
 
+def get_purchased_orders(telegram_id):
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    try:
+        return conn.execute(
+            "SELECT * FROM orders WHERE telegram_id = ? AND status IN ('confirmed', 'shipped') ORDER BY id DESC",
+            (telegram_id,)
+        ).fetchall()
+    finally:
+        conn.close()
+
 def delete_product(product_id):
     conn = sqlite3.connect(DB_NAME)
     try:
@@ -815,8 +826,8 @@ def track_back(call):
 
 @bot.callback_query_handler(func=lambda c: c.data == "adm_orders")
 def adm_orders(call):
-    bot.answer_callback_query(call.id)
     if not is_admin(call.from_user.id):
+        bot.answer_callback_query(call.id)
         return
 
     pending = get_pending_orders()
@@ -824,13 +835,13 @@ def adm_orders(call):
         bot.answer_callback_query(call.id, "سفارش در انتظاری نیست ✅", show_alert=True)
         return
 
+    bot.answer_callback_query(call.id)
     kb = InlineKeyboardMarkup(row_width=1)
     for o in pending:
         p = get_product(o["product_id"])
         name = p["name"] if p else f"#{o['id']}"
         kb.add(InlineKeyboardButton(f"⏳ #{o['id']} — {name}", callback_data=f"admord_{o['id']}"))
     bot.send_message(call.message.chat.id, "📋 سفارش‌های در انتظار بررسی:", reply_markup=kb)
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("admord_"))
 def adm_order_details(call):
@@ -885,5 +896,33 @@ def adm_ship_code(message, order_id):
                      f"می‌تونی از بخش «پیگیری سفارش» هم پیگیر باشی!")
 
     bot.send_message(message.chat.id, f"ارسال سفارش #{order_id} ثبت شد ✅ و به مشتری خبر دادم.")
+
+
+
+
+@bot.message_handler(func=lambda m: m.text == btn5)
+def my_purchases(message):
+    orders = get_purchased_orders(message.from_user.id)
+
+    if not orders:
+        bot.send_message(message.chat.id,
+                         "هنوز خریدی ثبت نکردی 🛍\nاز «ثبت سفارش» شروع کن!",
+                         reply_markup=main_kb)
+        return
+
+    kb = InlineKeyboardMarkup(row_width=1)
+    total = 0
+    for o in orders:
+        p = get_product(o["product_id"])
+        emoji = "📦" if o["status"] == "shipped" else "✅"
+        name = p["name"] if p else f"سفارش #{o['id']}"
+        if p:
+            total += p["price"]
+        kb.add(InlineKeyboardButton(f"{emoji} #{o['id']} — {name}", callback_data=f"trk_{o['id']}"))
+
+    text = (f"🛒 خریدهای شما ({len(orders)} سفارش)\n"
+            f"💰 مجموع: {total:,} تومان\n\n"
+            f"روی هر کدوم بزن جزئیاتش رو ببینی 👇")
+    bot.send_message(message.chat.id, text, reply_markup=kb)
 
 bot.infinity_polling()
