@@ -140,11 +140,11 @@ def get_photos(product_id):
 
 def get_user(telegram_id):
     conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row   
     try:
         return conn.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
     finally:
         conn.close()
-
 
 def save_user(telegram_id, first_name, last_name, address, postal_code, phone):
     conn = sqlite3.connect(DB_NAME)
