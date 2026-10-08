@@ -67,6 +67,7 @@ def init_db():
                     product_id INTEGER NOT NULL,
                     receipt_photo_id TEXT,
                     status TEXT DEFAULT 'pending',
+                    tracking TEXT,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -188,6 +189,39 @@ def get_order(order_id):
     finally:
         conn.close()
 
+def get_user_orders(telegram_id):
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    try:
+        return conn.execute(
+            "SELECT * FROM orders WHERE telegram_id = ? ORDER BY id DESC",
+            (telegram_id,)
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def get_pending_orders():
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    try:
+        return conn.execute(
+            "SELECT * FROM orders WHERE status = 'pending' ORDER BY id DESC"
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def set_tracking(order_id, tracking_code):
+    conn = sqlite3.connect(DB_NAME)
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE orders SET tracking = ?, status = 'shipped' WHERE id = ?",
+                (tracking_code, order_id)
+            )
+    finally:
+        conn.close()
 
 def set_order_status(order_id, status):
     conn = sqlite3.connect(DB_NAME)
@@ -424,6 +458,7 @@ def admin_menu():
         InlineKeyboardButton("➕ افزودن محصول", callback_data="adm_add"),
         InlineKeyboardButton("📦 تغییر موجودی", callback_data="adm_stock"),
         InlineKeyboardButton("🗑 حذف محصول", callback_data="adm_del"),
+        InlineKeyboardButton("📋 سفارش‌های در انتظار", callback_data="adm_orders"),  # ← جدید
     )
     return kb
 
@@ -693,5 +728,162 @@ def order_no(call):
     bot.edit_message_caption(call.message.caption + "\n\n❌ رد شد",
                              call.message.chat.id, call.message.message_id, reply_markup=None)
 
+
+STATUS_INFO = {
+    'pending':   ('⏳ در انتظار بررسی ادمین', 'فیش واریزی شما در حال بررسیه 🕵️'),
+    'confirmed': ('✅ تأیید شده', 'سفارش شما تأیید شد و در حال آماده‌سازیه 📦'),
+    'shipped':   ('📦 ارسال شده', 'سفارش شما با پست ارسال شده! 🚚'),
+    'rejected':  ('❌ رد شده', 'سفارش شما تأیید نشد. برای اطلاعات بیشتر با پشتیبانی تماس بگیر.'),
+}
+
+
+def order_details_text(order):
+    p = get_product(order["product_id"])
+    name = p["name"] if p else "محصول حذف شده"
+    price = f"{p['price']:,}" if p else "---"
+    emoji, desc = STATUS_INFO.get(order["status"], ('❓', ''))
+
+    text = (f"🧾 سفارش #{order['id']}\n\n"
+            f"🕶 {name}\n"
+            f"💰 {price} تومان\n"
+            f"📅 {order['created_at'][:10]}\n\n"
+            f"وضعیت: {emoji}\n{desc}")
+
+    if order["status"] == "shipped" and order["tracking"]:
+        text += (f"\n\n📮 کد رهگیری:\n{order['tracking']}\n\n"
+                 f"رهگیری آنلاین:")
+    return text
+
+
+@bot.message_handler(func=lambda m: m.text == btn4)
+def track_orders(message):
+    orders = get_user_orders(message.from_user.id)
+
+    if not orders:
+        bot.send_message(message.chat.id, "هنوز سفارشی ثبت نکردی 🛒\nاز «ثبت سفارش» شروع کن!", reply_markup=main_kb)
+        return
+
+    kb = InlineKeyboardMarkup(row_width=1)
+    for o in orders:
+        emoji, _ = STATUS_INFO.get(o["status"], ('❓', ''))
+        p = get_product(o["product_id"])
+        name = p["name"] if p else f"#{o['id']}"
+        kb.add(InlineKeyboardButton(f"{emoji} #{o['id']} — {name}", callback_data=f"trk_{o['id']}"))
+
+    bot.send_message(message.chat.id, "📋 سفارش‌های شما:\n\nروی هر کدوم بزن تا جزئیاتش رو ببینی 👇", reply_markup=kb)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("trk_"))
+def track_details(call):
+    bot.answer_callback_query(call.id)
+    order_id = int(call.data.split("_")[1])
+    order = get_order(order_id)
+
+
+    if not order or (order["telegram_id"] != call.from_user.id and not is_admin(call.from_user.id)):
+        bot.answer_callback_query(call.id, "دسترسی نداری!")
+        return
+
+    text = order_details_text(order)
+    kb = InlineKeyboardMarkup(row_width=1)
+
+    if order["status"] == "shipped" and order["tracking"]:
+        kb.add(InlineKeyboardButton("🔗 رهگیری در سایت پست",
+               url=config.POST_TRACKING_URL + order["tracking"]))
+
+    kb.add(InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="trk_back"))
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=kb)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "trk_back")
+def track_back(call):
+    bot.answer_callback_query(call.id)
+    orders = get_user_orders(call.from_user.id)
+    if not orders:
+        bot.edit_message_text("هنوز سفارشی ثبت نکردی 🛒", call.message.chat.id, call.message.message_id)
+        return
+    kb = InlineKeyboardMarkup(row_width=1)
+    for o in orders:
+        emoji, _ = STATUS_INFO.get(o["status"], ('❓', ''))
+        p = get_product(o["product_id"])
+        name = p["name"] if p else f"#{o['id']}"
+        kb.add(InlineKeyboardButton(f"{emoji} #{o['id']} — {name}", callback_data=f"trk_{o['id']}"))
+    bot.edit_message_text("📋 سفارش‌های شما:\n\nروی هر کدوم بزن تا جزئیاتش رو ببینی 👇",
+                          call.message.chat.id, call.message.message_id, reply_markup=kb)
+
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "adm_orders")
+def adm_orders(call):
+    bot.answer_callback_query(call.id)
+    if not is_admin(call.from_user.id):
+        return
+
+    pending = get_pending_orders()
+    if not pending:
+        bot.answer_callback_query(call.id, "سفارش در انتظاری نیست ✅", show_alert=True)
+        return
+
+    kb = InlineKeyboardMarkup(row_width=1)
+    for o in pending:
+        p = get_product(o["product_id"])
+        name = p["name"] if p else f"#{o['id']}"
+        kb.add(InlineKeyboardButton(f"⏳ #{o['id']} — {name}", callback_data=f"admord_{o['id']}"))
+    bot.send_message(call.message.chat.id, "📋 سفارش‌های در انتظار بررسی:", reply_markup=kb)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("admord_"))
+def adm_order_details(call):
+    bot.answer_callback_query(call.id)
+    if not is_admin(call.from_user.id):
+        return
+    order_id = int(call.data.split("_")[1])
+    order = get_order(order_id)
+    if not order:
+        return
+
+    user = get_user(order["telegram_id"])
+    uname = f"{user['first_name']} {user['last_name']}" if user else "نامشخص"
+
+    text = (f"🧾 سفارش #{order['id']}\n\n"
+            f"👤 {uname}\n"
+            f"📱 {user['phone'] if user else '---'}\n"
+            f"📍 {user['address'] if user else '---'}\n"
+            f"🏷 {user['postal_code'] if user else '---'}\n\n"
+            f"وضعیت: {STATUS_INFO.get(order['status'], ('❓',''))[0]}")
+
+    kb = InlineKeyboardMarkup(row_width=1)
+    if order["status"] == "confirmed":
+        kb.add(InlineKeyboardButton("📦 ثبت ارسال (کد رهگیری)", callback_data=f"admship_{order['id']}"))
+    kb.add(InlineKeyboardButton("🔙 بازگشت", callback_data="trk_back"))
+    bot.send_message(call.message.chat.id, text, reply_markup=kb)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("admship_"))
+def adm_ship(call):
+    bot.answer_callback_query(call.id)
+    if not is_admin(call.from_user.id):
+        return
+    order_id = int(call.data.split("_")[1])
+    msg = bot.send_message(call.message.chat.id, "کد رهگیری پستی رو بفرست (۲۰ رقم):")
+    bot.register_next_step_handler(msg, adm_ship_code, order_id)
+
+
+def adm_ship_code(message, order_id):
+    code = (message.text or "").translate(DIGITS).strip()
+    if not code.isdigit():
+        msg = bot.send_message(message.chat.id, "فقط عدد بفرست. کد رهگیری:")
+        bot.register_next_step_handler(msg, adm_ship_code, order_id)
+        return
+
+    order = get_order(order_id)
+    set_tracking(order_id, code)
+
+    bot.send_message(order["telegram_id"],
+                     f"سلام! سفارش #{order_id} ارسال شد 📦🚚\n\n"
+                     f"📮 کد رهگیری:\n{code}\n\n"
+                     f"می‌تونی از بخش «پیگیری سفارش» هم پیگیر باشی!")
+
+    bot.send_message(message.chat.id, f"ارسال سفارش #{order_id} ثبت شد ✅ و به مشتری خبر دادم.")
 
 bot.infinity_polling()
