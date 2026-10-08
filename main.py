@@ -158,6 +158,54 @@ def save_user(telegram_id, first_name, last_name, address, postal_code, phone):
     finally:
         conn.close()
 
+def get_product(product_id):
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    try:
+        return conn.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
+    finally:
+        conn.close()
+
+
+def create_order(telegram_id, product_id, receipt_photo_id):
+    conn = sqlite3.connect(DB_NAME)
+    try:
+        with conn:
+            cur = conn.execute(
+                "INSERT INTO orders (telegram_id, product_id, receipt_photo_id) VALUES (?, ?, ?)",
+                (telegram_id, product_id, receipt_photo_id)
+            )
+            return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def get_order(order_id):
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    try:
+        return conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+    finally:
+        conn.close()
+
+
+def set_order_status(order_id, status):
+    conn = sqlite3.connect(DB_NAME)
+    try:
+        with conn:
+            conn.execute("UPDATE orders SET status = ? WHERE id = ?", (status, order_id))
+    finally:
+        conn.close()
+
+
+def reduce_stock(product_id, qty=1):
+    conn = sqlite3.connect(DB_NAME)
+    try:
+        with conn:
+            conn.execute("UPDATE products SET stock = MAX(stock - ?, 0) WHERE id = ?", (qty, product_id))
+    finally:
+        conn.close()
+
 
 init_db()
 
@@ -513,5 +561,137 @@ def adm_del_do(call):
 def adm_cancel(call):
     bot.answer_callback_query(call.id)
     bot.edit_message_text("لغو شد.", call.message.chat.id, call.message.message_id)
+
+
+
+CARD_TEXT = """سفارش شما: {name}
+💰 قیمت: {price} تومان
+
+برای نهایی کردن سفارش، مبلغ رو به کارت زیر واریز کن:
+
+💳 شماره کارت:
+{card}
+
+💳 به نام: {owner}
+
+بعد از واریز، عکس فیش رو همین‌جا بفرست 📸
+(برای لغو /cancel بزن)"""
+
+
+@bot.message_handler(func=lambda m: m.text == btn3)
+def start_order(message):
+    if not get_user(message.from_user.id):
+        bot.send_message(message.chat.id, "اول با دکمه‌ی «ثبت نام» ثبت‌نام کن، بعد سفارش بده ✅", reply_markup=main_kb)
+        return
+
+    products = [p for p in get_products() if p["stock"] > 0]
+    if not products:
+        bot.send_message(message.chat.id, "فعلاً محصولی برای سفارش موجود نیست 😕")
+        return
+
+    kb = InlineKeyboardMarkup(row_width=1)
+    for p in products:
+        kb.add(InlineKeyboardButton(f"{p['name']} — {p['price']:,} تومان", callback_data=f"buy_{p['id']}"))
+    bot.send_message(message.chat.id, "کدوم محصول رو سفارش می‌دی؟ 👇", reply_markup=kb)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("buy_"))
+def buy_pick(call):
+    bot.answer_callback_query(call.id)
+    product_id = int(call.data.split("_")[1])
+    p = get_product(product_id)
+
+    if not p or p["stock"] <= 0:
+        bot.send_message(call.message.chat.id, "این محصول دیگه موجود نیست 😕")
+        return
+
+    text = CARD_TEXT.format(name=p["name"], price=f"{p['price']:,}",
+                            card=config.CARD_NUMBER, owner=config.CARD_OWNER)
+    msg = bot.send_message(call.message.chat.id, text)
+    bot.register_next_step_handler(msg, order_receipt, product_id)
+
+
+def order_receipt(message, product_id):
+
+    if message.text and message.text.startswith("/"):
+        bot.send_message(message.chat.id, "سفارش لغو شد.", reply_markup=main_kb)
+        return
+
+
+    if not message.photo:
+        msg = bot.send_message(message.chat.id, "لطفاً عکس فیش واریزی رو بفرست 📸 (یا /cancel برای لغو)")
+        bot.register_next_step_handler(msg, order_receipt, product_id)
+        return
+
+    p = get_product(product_id)
+    if not p or p["stock"] <= 0:
+        bot.send_message(message.chat.id, "این محصول دیگه موجود نیست. دوباره سفارش بده.", reply_markup=main_kb)
+        return
+
+    user = get_user(message.from_user.id)
+    photo_id = message.photo[-1].file_id
+    order_id = create_order(message.from_user.id, product_id, photo_id)
+
+    caption = (f"🧾 سفارش جدید #{order_id}\n\n"
+               f"👤 {user['first_name']} {user['last_name']}\n"
+               f"📱 {user['phone']}\n"
+               f"📍 {user['address']}\n"
+               f"🏷 کد پستی: {user['postal_code']}\n\n"
+               f"🕶 {p['name']}\n"
+               f"💰 {p['price']:,} تومان")
+
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("✅ تأیید سفارش", callback_data=f"ok_{order_id}"),
+        InlineKeyboardButton("❌ رد سفارش", callback_data=f"no_{order_id}"),
+    )
+    bot.send_photo(config.ADMIN_ID, photo_id, caption=caption, reply_markup=kb)
+    bot.send_message(message.chat.id,
+                     "فیش دریافت شد ✅ به محض تأیید ادمین بهت خبر می‌دیم!",
+                     reply_markup=main_kb)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ok_"))
+def order_ok(call):
+    if not is_admin(call.from_user.id):
+        return
+    order_id = int(call.data.split("_")[1])
+    order = get_order(order_id)
+
+    if not order or order["status"] != "pending":
+        bot.answer_callback_query(call.id, "این سفارش قبلاً بررسی شده.")
+        return
+
+    bot.answer_callback_query(call.id)
+    set_order_status(order_id, "confirmed")
+    reduce_stock(order["product_id"])
+
+    bot.send_message(order["telegram_id"],
+                     f"سلام! سفارش #{order_id} تأیید شد ✅\nبه‌زودی ارسال می‌شه 📦")
+
+    bot.edit_message_caption(call.message.caption + "\n\n✅ تأیید شد",
+                             call.message.chat.id, call.message.message_id, reply_markup=None)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("no_"))
+def order_no(call):
+    if not is_admin(call.from_user.id):
+        return
+    order_id = int(call.data.split("_")[1])
+    order = get_order(order_id)
+
+    if not order or order["status"] != "pending":
+        bot.answer_callback_query(call.id, "این سفارش قبلاً بررسی شده.")
+        return
+
+    bot.answer_callback_query(call.id)
+    set_order_status(order_id, "rejected")
+
+    bot.send_message(order["telegram_id"],
+                     f"سفارش #{order_id} تأیید نشد ❌\nبرای بررسی بیشتر با پشتیبانی تماس بگیر.")
+
+    bot.edit_message_caption(call.message.caption + "\n\n❌ رد شد",
+                             call.message.chat.id, call.message.message_id, reply_markup=None)
+
 
 bot.infinity_polling()
