@@ -3,6 +3,23 @@ import config
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, InputMediaPhoto
 import sqlite3
 import re
+import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+class PingHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive!")
+
+def run_healthcheck():
+    port = int(os.environ.get('PORT', 8080))
+    server = HTTPServer(('0.0.0.0', port), PingHandler)
+    server.serve_forever()
+
+
+
 
 bot = TeleBot(config.TOKEN)
 
